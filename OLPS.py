@@ -6,6 +6,8 @@ import cvxpy as cp
 
 class OLPS:
     """
+    https://mlfinlab.readthedocs.io/en/latest/index.html
+
     Online Portfolio Selection is an algorithmic trading strategy that sequentially allocates
     capital among a group of assets to maximize the final returns of the investment.
 
