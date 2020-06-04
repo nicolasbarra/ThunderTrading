@@ -8,3 +8,4 @@ aapl = api.polygon.historic_agg_v2('AAPL', 1, 'day', _from='2019-01-01', to='201
 
 print(aapl)
 
+#printing
