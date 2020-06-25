@@ -4,10 +4,11 @@ import requests
 import websocket
 import os
 import pandas as pd
+import numpy as np
 import datetime
 
 socket = "wss://alpaca.socket.polygon.io/stocks"
-TICKERS = "A.MSFT, A.AAPL, A.F"
+TICKERS = "AM.MSFT, AM.AAPL, AM.F"
 API_KEY = os.getenv('APCA_API_KEY_ID')
 # HEADERS = {'APCA_API_KEY_ID': os.getenv("APCA_API_KEY_ID"), 'APCA_API_SECRET_KEY': os.getenv("APCA_API_SECRET_KEY")}
 
@@ -30,6 +31,143 @@ df = pd.DataFrame(columns=stocks)
 print("this is df", df)
 
 
+def _update_weight(window, weights, np_asset_prices, n_iterations, tau, time, number_of_assets, epsilon):
+    """
+    Predicts the next time's portfolio weight.
+
+    :param time: (int) Current time period.
+    :return: (np.array) Predicted weights.
+    """
+    # Until the relative time window, return original weights.
+    if time < window - 1:
+        return weights
+
+    # Set the current predicted relatives value.
+    current_prediction = _calculate_predicted_relatives(np_asset_prices, window, n_iterations, tau, time)
+
+    # Set the deviation from the mean of current prediction.
+    predicted_deviation = current_prediction - np.ones(number_of_assets) * np.mean(
+        current_prediction)
+
+    # Calculate alpha, the lagrangian multiplier.
+    norm2 = np.linalg.norm(predicted_deviation, ord=1) ** 2
+
+    # If norm2 is zero, return previous weights.
+    if norm2 == 0:
+        return weights
+    alpha = np.minimum(0, (current_prediction * weights - epsilon) / norm2)
+
+    # Update new weights.
+    new_weights = weights - alpha * predicted_deviation
+
+    # Project to simplex domain.
+    new_weights = _simplex_projection(new_weights)
+
+    return new_weights
+
+def _simplex_projection(weight):
+    """
+    Calculates the simplex projection of weights.
+    https://stanford.edu/~jduchi/projects/DuchiShSiCh08.pdf
+
+    :param weight: (np.array) Weight to be projected onto the simplex domain.
+    :return: (np.array) Simplex projection of the original weight.
+    """
+    # Sort in descending order.
+    _mu = np.sort(weight)[::-1]
+
+    # Calculate adjusted sum.
+    adjusted_sum = np.cumsum(_mu) - 1
+    j = np.arange(len(weight)) + 1
+
+    # Determine the conditions.
+    cond = _mu - adjusted_sum / j > 0
+
+    # If all conditions are false, return uniform weight.
+    if not cond.any():
+        uniform_weight = np.ones(len(weight)) / len(weight)
+        return uniform_weight
+
+    # Define max rho.
+    rho = float(j[cond][-1])
+
+    # Define theta.
+    theta = adjusted_sum[cond][-1] / rho
+
+    # Calculate new weight.
+    new_weight = np.maximum(weight - theta, 0)
+    return new_weight
+
+def _calculate_predicted_relatives(np_asset_prices, window, n_iteration, tau, time):
+    """
+    Calculates the predicted relatives using l1 median.
+
+    :param time: (int) Current time.
+    :return: (np.array) Predicted relatives using l1 median.
+    """
+    # Calculate the L1 median of the price window.
+    price_window = np_asset_prices[time - window + 1:time + 1]
+    curr_prediction = np.median(price_window, axis=0)
+
+    # Iterate until the maximum iteration allowed.
+    for _ in range(n_iteration - 1):
+        prev_prediction = curr_prediction
+        # Transform mu according the Modified Weiszfeld Algorithm
+        curr_prediction = _transform(curr_prediction, price_window)
+
+        # If null value or condition is satisfied, break.
+        if curr_prediction.size == 0 or np.linalg.norm(prev_prediction - curr_prediction, ord=1) \
+                <= tau * np.linalg.norm(curr_prediction, ord=1):
+            curr_prediction = prev_prediction
+            break
+
+    # Divide by the current time's price.
+    predicted_relatives = curr_prediction / price_window[-1]
+
+    return predicted_relatives
+
+
+def _transform(old_mu, price_window):
+    """
+    Calculates L1 median approximation by using the Modified Weiszfeld Algorithm.
+
+    :param old_mu: (np.array) Current value of the predicted median value.
+    :param price_window: (np.array) A window of prices provided by the user.
+    :return: (np.array) New updated l1 median approximation.
+    """
+    # Calculate the difference set.
+    diff = price_window - old_mu
+
+    # Remove rows with all zeros.
+    non_mu = diff[~np.all(diff == 0, axis=1)]
+
+    # Edge case for identical price windows.
+    if non_mu.shape[0] == 0:
+        return non_mu
+
+    # Number of zeros.
+    n_zero = diff.shape[0] - non_mu.shape[0]
+
+    # Calculate eta.
+    eta = 0 if n_zero == 0 else 1
+
+    # Calculate l1 norm of non_mu.
+    l1_norm = np.linalg.norm(non_mu, ord=1, axis=1)
+
+    # Calculate tilde.
+    tilde = 1 / np.sum(1 / l1_norm) * np.sum(np.divide(non_mu.T, l1_norm), axis=1)
+
+    # Calculate gamma.
+    gamma = np.linalg.norm(
+        np.sum(np.apply_along_axis(lambda x: x / np.linalg.norm(x, ord=1), 1, non_mu), axis=0),
+        ord=1)
+
+    # Calculate next_mu value.
+    with np.errstate(invalid='ignore'):
+        next_mu = np.maximum(0, 1 - eta / gamma) * tilde + np.minimum(1, eta / gamma) * old_mu
+    return tilde if eta == 0 else next_mu
+
+
 def on_open(webs):
     auth_data = {
         "action": "auth",
@@ -50,26 +188,26 @@ def on_message(webs, message):
     time = current_line['e']
     ticker = current_line['sym']
     price = current_line['vw']
-    last_time = -1
-    if df.size != 0:
-        last_time = df['Time'].iloc[-1]
-    if last_time != time or last_time == -1:
-        # print("price: ", price, "ticker: ", ticker)
-        df.loc[df.index.max() + 1] = [time, price, -1, -1]
-        # df.append({'Time': time, ticker: price})
-        # print(df)
-        if df.size > 60:
-            df.drop(df.index[:1], inplace=True)
+    if df.size == 0:
+        df.loc[0, "Time"] = time
+        df.loc[0, ticker] = price
     else:
-        df.loc[-1, ticker] = price
-
+        last_time = df['Time'].iloc[-1]
+        if last_time == time:
+            df.loc[df.index.max(), ticker] = price
+        else:
+            new_index = df.index.max() + 1
+            df.loc[new_index, "Time"] = time
+            df.loc[new_index, ticker] = price
+            if len(df.index) > 20:
+                df.drop(df.index[0], inplace=True)
 
 def on_close(webs):
     print("Connection closed.")
+    print(df)
 
-
-# ws = websocket.WebSocketApp(socket, on_open=on_open, on_message=on_message, on_close=on_close)
-# ws.run_forever()
+ws = websocket.WebSocketApp(socket, on_open=on_open, on_message=on_message, on_close=on_close)
+ws.run_forever()
 message_array = [
     {'ev': 'A', 'sym': 'AAPL', 'v': 1778, 'av': 37672744, 'op': 351.46, 'vw': 351.1188, 'o': 351.12, 'c': 351.11,
      'h': 351.125, 'l': 351.11, 'a': 350.7528, 'z': 127, 'n': 1, 's': 1592337499000, 'e': 1592337500000},
@@ -162,23 +300,24 @@ message_array = [
     {'ev': 'A', 'sym': 'MSFT', 'v': 1196, 'av': 35501246, 'op': 192.89, 'vw': 193.3669, 'o': 193.36, 'c': 193.38,
      'h': 193.38, 'l': 193.36, 'a': 193.4721, 'z': 56, 'n': 1, 's': 1592337513000, 'e': 1592337514000}]
 
-for current_line in message_array:
-    time = current_line['e']
-    ticker = current_line['sym']
-    price = current_line['vw']
-    print("ticker", ticker)
-    if df.size == 0:
-        df.loc[0, "Time"] = time
-        df.loc[0, ticker] = price
-    else:
-        last_time = df['Time'].iloc[-1]
-        if last_time == time:
-            df.loc[df.index.max(), ticker] = price
-        else:
-            new_index = df.index.max() + 1
-            df.loc[new_index, "Time"] = time
-            df.loc[new_index, ticker] = price
-            if len(df.index) > 10:
-                df.drop(df.index[0], inplace=True)
-print(df)
-print(df.columns)
+# for current_line in message_array:
+#     time = current_line['e']
+#     ticker = current_line['sym']
+#     price = current_line['vw']
+#     print("ticker", ticker)
+#     if df.size == 0:
+#         df.loc[0, "Time"] = time
+#         df.loc[0, ticker] = price
+#     else:
+#         last_time = df['Time'].iloc[-1]
+#         if last_time == time:
+#             df.loc[df.index.max(), ticker] = price
+#         else:
+#             new_index = df.index.max() + 1
+#             df.loc[new_index, "Time"] = time
+#             df.loc[new_index, ticker] = price
+#             if len(df.index) > 10:
+#                 df.drop(df.index[0], inplace=True)
+#
+# print(df)
+# print(df.columns)
