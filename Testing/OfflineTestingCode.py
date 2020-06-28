@@ -1,7 +1,6 @@
 from RMRStrat import df
 from RMRStrat import _update_weight
-from TestingDataMessage import message_array
-from TestingDataMinute import minute_data
+from Testing.TestingDataMinute import minute_data
 
 for current_line in minute_data:
     time = current_line['e']
