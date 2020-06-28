@@ -7,3 +7,5 @@ This ongoing project attempts to build a functional algorithmic trading platform
 ## Technologies Used
   - NumPy
   - pandas
+  - Alpaca API
+  - Polgon.io API
