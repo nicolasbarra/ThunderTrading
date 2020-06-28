@@ -8,4 +8,4 @@ This ongoing project attempts to build a functional algorithmic trading platform
   - NumPy
   - pandas
   - Alpaca API
-  - Polgon.io API
+  - Polygon.io API
